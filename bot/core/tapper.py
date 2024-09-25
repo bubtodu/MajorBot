@@ -9,6 +9,7 @@ from pyrogram import Client
 from pyrogram.errors import Unauthorized, UserDeactivated, AuthKeyUnregistered, FloodWait
 from pyrogram.raw.functions import account, messages
 import time
+import re
 import json
 from pyrogram.raw.types import InputBotAppShortName, InputNotifyPeer, InputPeerNotifySettings
 from .agents import generate_random_user_agent
@@ -112,9 +113,18 @@ class Tapper:
 
         try:
             parsed_link = link if 'https://t.me/+' in link else link[13:]
+            
             chat = await self.tg_client.get_chat(parsed_link)
-            chat_username = getattr(chat, 'username', link)
-            logger.info(f"{self.session_name} | Get channel: <y>{chat_username}</y>")
+            
+            if chat.username:
+                chat_username = chat.username
+            elif chat.id:
+                chat_username = chat.id
+            else:
+                logger.info("Unable to get channel username or id")
+                return
+            
+            logger.info(f"{self.session_name} | Retrieved channel: <y>{chat_username}</y>")
             try:
                 await self.tg_client.get_chat_member(chat_username, "me")
             except Exception as error:
@@ -221,12 +231,40 @@ class Tapper:
         return detail.get('rating') if detail else 0
     
     @error_handler
-    async def join_squad(self, http_client):
-        return await self.make_request(http_client, 'POST', endpoint="/squads/2237841784/join/?")
+    async def leave_squad(self, http_client, squad_id):
+        return await self.make_request(http_client, 'POST', endpoint=f"/squads/{squad_id}/leave/?")
+    
+    @error_handler
+    async def join_squad(self, http_client, squad_id):
+        return await self.make_request(http_client, 'POST', endpoint=f"/squads/{squad_id}/join/?")
     
     @error_handler
     async def get_squad(self, http_client, squad_id):
         return await self.make_request(http_client, 'GET', endpoint=f"/squads/{squad_id}?")
+    
+    @error_handler
+    async def youtube_answers(self, http_client, task_id, task_title):
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://raw.githubusercontent.com/GravelFire/TWFqb3JCb3RQdXp6bGVEdXJvdg/master/answer.py") as response:
+                status = response.status
+                if status == 200:
+                    response_data = json.loads(await response.text())
+                    youtube_answers = response_data.get('youtube', {})
+                    if task_title in youtube_answers:
+                        answer = youtube_answers[task_title]
+                        payload = {
+                            "task_id": task_id,
+                            "payload": {
+                                "code": answer
+                            }
+                        }
+                        logger.info(f"{self.session_name} | Attempting YouTube task: <y>{task_title}</y>")
+                        response = await self.make_request(http_client, 'POST', endpoint="/tasks/", json=payload)
+                        if response and response.get('is_completed') is True:
+                            logger.info(f"{self.session_name} | Completed YouTube task: <y>{task_title}</y>")
+                            return True
+        return False
+    
     
     @error_handler
     async def puvel_puzzle(self, http_client):
@@ -302,10 +340,19 @@ class Tapper:
                 rating = await self.get_detail(http_client=http_client)
                 logger.info(f"{self.session_name} | ID: <y>{user.get('id')}</y> | Points : <y>{rating}</y>")
                 
+                
                 if squad_id is None:
-                    await self.join_squad(http_client=http_client)
-                    squad_id = "2237841784"
+                    await self.join_squad(http_client=http_client, squad_id=settings.SQUAD_ID)
+                    squad_id = settings.SQUAD_ID
                     await asyncio.sleep(1)
+                
+                if squad_id != settings.SQUAD_ID:
+                    await self.leave_squad(http_client=http_client, squad_id=squad_id)
+                    await asyncio.sleep(random.randint(5, 7))
+                    await self.join_squad(http_client=http_client, squad_id=settings.SQUAD_ID)
+                    squad_id = settings.SQUAD_ID
+                    await asyncio.sleep(1)
+                    
                     
                 logger.info(f"{self.session_name} | Squad ID: <y>{squad_id}</y>")
                 data_squad = await self.get_squad(http_client=http_client, squad_id=squad_id)
@@ -320,61 +367,68 @@ class Tapper:
                 await self.streak(http_client=http_client)
                 
                 
-                hold_coins = await self.claim_hold_coins(http_client=http_client)
-                if hold_coins:
-                    await asyncio.sleep(1)
-                    logger.info(f"{self.session_name} | Reward HoldCoins: <y>+{hold_coins}⭐</y>")
-                await asyncio.sleep(10)
+                tasks = [
+                    ('HoldCoins', self.claim_hold_coins),
+                    ('SwipeCoins', self.claim_swipe_coins),
+                    ('Roulette', self.claim_roulette),
+                    ('Puzzle', self.puvel_puzzle),
+                    ('d_tasks', self.get_daily),
+                    ('m_tasks', self.get_tasks)
+                ]
                 
+                random.shuffle(tasks)
                 
-                swipe_coins = await self.claim_swipe_coins(http_client=http_client)
-                if swipe_coins:
-                    await asyncio.sleep(1)
-                    logger.info(f"{self.session_name} | Reward SwipeCoins: <y>+{swipe_coins}⭐</y>")
-                await asyncio.sleep(10)
-                
-                
-                roulette = await self.claim_roulette(http_client=http_client)
-                if roulette:
-                    await asyncio.sleep(1)
-                    logger.info(f"{self.session_name} | Reward Roulette : <y>+{roulette}⭐</y>")
-                await asyncio.sleep(10)
-                
-                puzzle = await self.puvel_puzzle(http_client=http_client)
-                if puzzle:
-                    await asyncio.sleep(1)
-                    logger.info(f"{self.session_name} | Reward Puzzle Pavel: <y>+5000⭐</y>")
-                await asyncio.sleep(10)
-                
-                
-                data_daily = await self.get_daily(http_client=http_client)
-                if data_daily:
-                    for daily in reversed(data_daily):
-                        await asyncio.sleep(10)
-                        id = daily.get('id')
-                        title = daily.get('title')
-                        #if title not in ["Donate rating", "Boost Major channel", "TON Transaction"]:
-                        data_done = await self.done_tasks(http_client=http_client, task_id=id)
-                        if data_done and data_done.get('is_completed') is True:
+                for task_name, task_func in tasks:
+                    
+                    #logger.info(f"{self.session_name} | Task <y>{task_name}</y>")
+                    
+                    # Игрушки в Major, выполняются раз в 8 часов или если перейдут по рефералке 10 пользователей
+                    if task_name in ['HoldCoins', 'SwipeCoins', 'Roulette', 'Puzzle']:
+                        result = await task_func(http_client=http_client)
+                        if result:
                             await asyncio.sleep(1)
-                            logger.info(f"{self.session_name} | Daily Task : <y>{daily.get('title')}</y> | Reward : <y>{daily.get('award')}</y>")
-                
-                data_task = await self.get_tasks(http_client=http_client)
-                if data_task:
-                    for task in data_task:
+                            reward = "+5000⭐" if task_name == 'Puzzle' else f"+{result}⭐"
+                            logger.info(f"{self.session_name} | Reward {task_name}: <y>{reward}</y>")
                         await asyncio.sleep(10)
-                        id = task.get('id')
-                        if task.get('type') == 'subscribe_channel':
-                            if not settings.TASKS_WITH_JOIN_CHANNEL:
-                                continue
-                            await self.join_and_mute_tg_channel(link=task.get('payload').get('url'))
-                            await asyncio.sleep(5)
-                        
-                        data_done = await self.done_tasks(http_client=http_client, task_id=id)
-                        if data_done and data_done.get('is_completed') is True:
-                            await asyncio.sleep(1)
-                
-                            logger.info(f"{self.session_name} | Task : <y>{task.get('title')}</y> | Reward : <y>{task.get('award')}</y>")
+                    
+                    # Ежедневные задания, которые можно выполнять каждый день
+                    elif task_name == 'd_tasks':
+                        data_daily = await task_func(http_client=http_client)
+                        if data_daily:
+                            random.shuffle(data_daily)
+                            for daily in data_daily:
+                                await asyncio.sleep(10)
+                                id = daily.get('id')
+                                title = daily.get('title')
+                                data_done = await self.done_tasks(http_client=http_client, task_id=id)
+                                if data_done and data_done.get('is_completed') is True:
+                                    await asyncio.sleep(1)
+                                    logger.info(f"{self.session_name} | Daily Task : <y>{daily.get('title')}</y> | Reward : <y>{daily.get('award')}</y>")
+                    
+                    # Основные задания, которые одноразово выполняются
+                    elif task_name == 'm_tasks':
+                        data_task = await task_func(http_client=http_client)
+                        if data_task:
+                            random.shuffle(data_task)
+                            for task in data_task:
+                                await asyncio.sleep(10)
+                                id = task.get('id')
+                                title = task.get("title", "")
+                                if task.get("type") == "code":
+                                    await self.youtube_answers(http_client=http_client, task_id=id, task_title=title)
+                                    continue
+                                
+                                if task.get('type') == 'subscribe_channel' or re.findall(r'(Join|Subscribe|Follow).*?channel', title, re.IGNORECASE):
+                                    if not settings.TASKS_WITH_JOIN_CHANNEL:
+                                        continue
+                                    await self.join_and_mute_tg_channel(link=task.get('payload').get('url'))
+                                    await asyncio.sleep(5)
+                                
+                                data_done = await self.done_tasks(http_client=http_client, task_id=id)
+                                if data_done and data_done.get('is_completed') is True:
+                                    await asyncio.sleep(1)
+                                    logger.info(f"{self.session_name} | Task : <y>{title}</y> | Reward : <y>{task.get('award')}</y>")
+                    
                 await http_client.close()
                 if proxy_conn:
                     if not proxy_conn.closed:
